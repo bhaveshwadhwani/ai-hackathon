@@ -1,728 +1,227 @@
-# pylint: disable=line-too-long,invalid-name
-"""
-This module demonstrates the usage of the Llama models within a Streamlit application.
-"""
-
-import os
-
 import streamlit as st
-import vertexai
-from vertexai.generative_models import (
-    GenerationConfig,
-    GenerativeModel,
-    HarmBlockThreshold,
-    HarmCategory,
-    Part,
-)
+import requests
+import json
+import os
+import re
 
+# API configuration
+url = "https://proxy.tune.app/chat/completions"
+headers = {
+    "Authorization": "sk-tune-V05AcvTVpDt7GrJj4Th23QyBb95alb4XVfT",
+    "Content-Type": "application/json",
+}
+def make_api_call(messages, stream=False, max_tokens=300):
+    data = {
+        "temperature": 0.7,
+        "messages": messages,
+        "model": "meta/llama-3.2-90b-vision",
+        "stream": stream,
+        "frequency_penalty": 0.2,
+        "max_tokens": max_tokens
+    }
+    response = requests.post(url, headers=headers, json=data)
+    response_json = response.json()
+    
+    if stream:
+        return response.iter_lines()
+    
+    assistant_response = response_json['choices'][0]['message']['content']
+    
+    # Check if response is cut off
+    if response_json['choices'][0]['finish_reason'] != 'stop':
+        continuation_messages = messages + [{"role": "assistant", "content": assistant_response}]
+        continuation_data = {
+            "temperature": 0.7,
+            "messages": continuation_messages,
+            "model": "meta/llama-3.2-90b-vision",
+            "stream": stream,
+            "frequency_penalty": 0.2,
+            "max_tokens": max_tokens
+        }
+        continuation_response = requests.post(url, headers=headers, json=continuation_data)
+        continuation_json = continuation_response.json()
+        assistant_response += continuation_json['choices'][0]['message']['content']
+    
+    return {"choices": [{"message": {"content": assistant_response}}]}
 
-# Chat completions API
-import openai
-from google.auth import default, transport
-from google.cloud import storage
-from PIL import Image
+def extract_keyword(prompt):
+    messages = [
+        {"role": "system", "content": "You are TuneStudio"},
+        {"role": "user", "content": f"Extract the main keyword or concept from the following query. Respond with only the keyword or concept, nothing else. Query: {prompt}"}
+    ]
+    response = make_api_call(messages)
+    return response['choices'][0]['message']['content'].strip()
 
+def generate_questions(keyword):
+    messages = [
+        {"role": "system", "content": "You are TuneStudio"},
+        {"role": "user", "content": f"""Generate a mix of 10 questions about key concepts related to '{keyword}' in the context of machine learning or AI. 
+        Include the following mix:
+        - 4 Yes/No questions
+        - 3 Multiple choice questions (with 4 options each)
+        - 3 True/False questions
+        
+        Each question should focus on a distinct sub-concept or aspect of {keyword}.
+        Ensure the questions range from basic to advanced concepts to gauge the user's depth of understanding.
+        
+        Format each question as follows:
+        1. [Question] (Type: Y/N, MC, or T/F)
+        [For MC questions, list options as:
+        a) [option]
+        b) [option]
+        c) [option]
+        d) [option]]
+        (Correct Answer)
+        
+        2. [Next Question]...
+        This is how an MC question can look-
+        Q)How do Transformers typically handle longer input sequences that exceed their maximum context length?
 
-# authentication
-credentials, _ = default()
-auth_request = transport.requests.Request()
-credentials.refresh(auth_request)
+        a) By using sliding window attention
+        b) By truncating the input to fit the maximum length
+        c) By using recurrent layers to process the sequence iteratively
+        d) By automatically increasing the model's context length
+        This is how a T/F question can look-
+        True or False: The Transformer architecture relies on convolutional layers.
+        a)True
+        b)False
+        This is how a Y/N question can look-
+        Are Transformers typically used for sequence-to-sequence tasks?
+        a)Yes
+        b)No
+        
+        Provide only the questions, options (for MC), and correct answers. For a Y/N question, provide yes or no options but if the question is T/F provide True or False options. If the question is MC, provide the options with one of them being the right answer. Don't provide a  No additional text."""}
+    ]
+    response = make_api_call(messages)
+    questions = response['choices'][0]['message']['content'].strip().split('\n\n')
+    return [q.strip() for q in questions if q.strip() and q[0].isdigit()]
 
-PROJECT_ID = os.environ.get("GCP_PROJECT")
-LOCATION = os.environ.get("GCP_REGION")
-
-
-BUCKET_URI = f"gs://{PROJECT_ID}"
-
-# Only `us-central1` is supported region for Llama 3.2 models using Model-as-a-Service (MaaS).
-LOCATION = "us-central1"
-
-vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=BUCKET_URI)
-
-MODEL_LOCATION = "us-central1"
-MAAS_ENDPOINT = f"{MODEL_LOCATION}-aiplatform.googleapis.com"
-
-client = openai.OpenAI(
-    base_url=f"https://{MAAS_ENDPOINT}/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/openapi",
-    api_key=credentials.token,
-)
-
-
-MODEL_ID = "meta/llama-3.2-90b-vision-instruct-maas"  # @param {type:"string"} ["meta/llama-3.2-90b-vision-instruct-maas"]
-
-max_tokens = 4096
-
-
-def get_gemini_response(
-    model: GenerativeModel,
-    contents: str | list,
-    generation_config: GenerationConfig = GenerationConfig(
-        temperature=0.1, max_output_tokens=2048
-    ),
-    stream: bool = True,
-) -> str:
-    """Generate a response from the Gemini model."""
-    # safety_settings = {
-    #     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    #     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    #     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    #     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    # }
-
-    responses = model.generate_content(
-        contents,
-        generation_config=generation_config,
-        safety_settings=safety_settings,
-        stream=stream,
-    )
-
-    if not stream:
-        return responses.text
-
-    final_response = []
-    for r in responses:
-        try:
-            final_response.append(r.text)
-        except IndexError:
-            final_response.append("")
+def create_quiz(questions):
+    user_answers = []
+    for i, question in enumerate(questions):
+        lines = question.split('\n')
+        q_text = lines[0].split('.', 1)[1].split('(')[0].strip()
+        q_type = lines[0].split('(')[1].split(')')[0].strip()
+        
+        st.write(f"Q{i+1}: {q_text}")
+        
+        if q_type == "Y/N":
+            options = ["Yes", "No"]
+        elif q_type == "T/F":
+            options = ["True", "False"]
+        elif q_type == "MC":
+            options = [re.sub(r'^[a-d]\)\s*', '', line.strip()) for line in lines[1:-1]]
+        else:
+            st.warning(f"Unknown question type for Q{i+1}")
             continue
-    return " ".join(final_response)
+        
+        key = f"answer_{i}"
+        if key not in st.session_state:
+            st.session_state[key] = None
+        
+        answer = st.radio(f"Answer {i+1}", options, key=key, index=None)
+        user_answers.append(answer)
+    
+    return user_answers
+
+def analyze_understanding(keyword, questions, user_answers):
+    analysis_prompt = f"Based on the following questions and answers about '{keyword}', identify which concepts the user understands and which they don't. Questions and user answers:\n"
+    for q, ua in zip(questions, user_answers):
+        lines = q.split('\n')
+        q_text = lines[0].split('.', 1)[1].split('(')[0].strip()
+        correct_answer = lines[-1].strip()[1:-1]  # Remove parentheses
+        analysis_prompt += f"Q: {q_text}\nUser's Answer: {ua}\nCorrect Answer: {correct_answer}\n\n"
+    analysis_prompt += "\nList the concepts understood and not understood. Format: Understood: [list], Not Understood: [list]"
+    
+    messages = [
+        {"role": "system", "content": "You are TuneStudio"},
+        {"role": "user", "content": analysis_prompt}
+    ]
+    response = make_api_call(messages)
+    return response['choices'][0]['message']['content']
 
 
+def generate_tailored_explanation(keyword, understood, not_understood):
+    explanation_prompt = f"""Provide a tailored explanation of {keyword} for someone who understands {understood} but doesn't understand {not_understood}. 
+    Explain {keyword} in depth, focusing on explaining {not_understood} thoroughly. 
+    Only briefly mention {understood} without going into detail. 
+    Keep the explanation clear and concise, suitable for someone learning about {keyword}."""
+    
+    messages = [
+        {"role": "system", "content": "You are TuneStudio"},
+        {"role": "user", "content": explanation_prompt}
+    ]
+    response = make_api_call(messages)
+    return response['choices'][0]['message']['content']
 
-def get_llama_response(
-    # model: GenerativeModel,
-    # contents: str | list,
-    # generation_config: GenerationConfig = GenerationConfig(
-    #     temperature=0.1, max_output_tokens=2048
-    # ),
-    client,
-    prompt,
-    stream: bool = True,
-) -> str:
-    """Generate a response from the llama model."""
+def llama_tab():
+    st.subheader("LLama Concept Quiz and Tailored Explanation")
 
-
-    response = client.chat.completions.create(
-    model=MODEL_ID,
-    messages=[
-        {
-            "role": "user",
-            "content": [
-                {"text": prompt, "type": "text"},
-            ],
-        },
-        {"role": "assistant", "content": "You need to generate questions on the given:{prompt}"},
-    ],
-    max_tokens=max_tokens,
-)
-
-    return response.choices[0].message.content
-
-
-def get_model_name(model: GenerativeModel) -> str:
-    """Get Gemini Model Name"""
-    model_name = model._model_name.replace(  # pylint: disable=protected-access
-        "publishers/google/models/", ""
-    )
-    return f"`{model_name}`"
-
-
-def get_storage_url(gcs_uri: str) -> str:
-    """Convert a GCS URI to a storage URL."""
-    return "https://storage.googleapis.com/" + gcs_uri.split("gs://")[1]
-
-
-st.header("LLama Models", divider="rainbow")
-
-tab0, tab1 = st.tabs(
-    ["LLama","Generate story"]
-)
-
-
-with tab0:
-    st.subheader("Generate a LLama response")
+    # Initialize session state variables
+    if 'quiz_generated' not in st.session_state:
+        st.session_state.quiz_generated = False
+    if 'keyword' not in st.session_state:
+        st.session_state.keyword = ""
+    if 'questions' not in st.session_state:
+        st.session_state.questions = []
+    if 'analysis' not in st.session_state:
+        st.session_state.analysis = ""
+    if 'explanation' not in st.session_state:
+        st.session_state.explanation = ""
 
     # User query
-    user_query = st.text_input(
-        "Enter Query: \n\n", key="query", value="What is a transformer"
-    )
+    user_query = st.text_input("Enter a concept or topic you want to learn about:", key="query")
 
-    prompt = f"""Generate three yes or no Questions regarding key words of the {user_query}
-        """
+    if user_query and not st.session_state.quiz_generated:
+        # Extract keyword and generate questions
+        if st.button("Generate Quiz"):
+            with st.spinner("Extracting main concept and generating questions..."):
+                st.session_state.keyword = extract_keyword(user_query)
+                st.session_state.questions = generate_questions(st.session_state.keyword)
+                st.session_state.quiz_generated = True
 
-    generate_t0t = st.button("Generate Questions", key="generate_t0t")
+    if st.session_state.quiz_generated:
+        st.write(f"Main concept identified: {st.session_state.keyword}")
+        user_answers = create_quiz(st.session_state.questions)
+        
+        if st.button("Submit Quiz and Get Explanation"):
+            if None in user_answers:
+                st.warning("Please answer all questions before submitting.")
+            else:
+                with st.spinner("Analyzing your understanding and generating explanation..."):
+                    st.session_state.analysis = analyze_understanding(st.session_state.keyword, st.session_state.questions, user_answers)
+                    analysis_parts = st.session_state.analysis.split("Not Understood:")
+                    if len(analysis_parts) == 2:
+                        understood = analysis_parts[0].split("Understood:")[1].strip()
+                        not_understood = analysis_parts[1].strip()
+                    else:
+                        understood = "some concepts"
+                        not_understood = "other concepts"
+                    st.session_state.explanation = generate_tailored_explanation(st.session_state.keyword, understood, not_understood)
 
-    if generate_t0t and prompt:
-        # st.write(prompt)
-        with st.spinner(
-            f"Generating your responses..."
-        ):
-           
-            response = get_llama_response(client, prompt)
+        if st.session_state.explanation:
+            st.write("Tailored Explanation:")
+            st.write(st.session_state.explanation)
+
+        if st.button("Reset Quiz"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.session_state.quiz_generated = False
+            st.session_state.explanation = ""
+
+# Update your main function to use this new llama_tab function
+def main():
+    st.header("LLM Models", divider="rainbow")
     
-            if response:
-                st.write("Your answer:")
-                st.write(response)
+    tab0, tab1 = st.tabs(["LLama Concept Quiz", "Generate story"])
+    
+    with tab0:
+        llama_tab()
+    
+    with tab1:
+        # Your existing story generation code here
+        st.subheader("Generate a story")
+        # Add your story generation code here
 
-with tab1:
-    st.subheader("Generate a story")
-
-# with tab2:
-#     st.subheader("Generate your marketing campaign")
-
-#     selected_model = st.radio(
-#         "Select Gemini Model:",
-#         [gemini_15_flash, gemini_15_pro],
-#         format_func=get_model_name,
-#         key="selected_model_marketing",
-#         horizontal=True,
-#     )
-
-#     product_name = st.text_input(
-#         "What is the name of the product? \n\n", key="product_name", value="ZomZoo"
-#     )
-#     product_category = st.radio(
-#         "Select your product category: \n\n",
-#         ["Clothing", "Electronics", "Food", "Health & Beauty", "Home & Garden"],
-#         key="product_category",
-#         horizontal=True,
-#     )
-#     st.write("Select your target audience: ")
-#     target_audience_age = st.radio(
-#         "Target age: \n\n",
-#         ["18-24", "25-34", "35-44", "45-54", "55-64", "65+"],
-#         key="target_audience_age",
-#         horizontal=True,
-#     )
-#     # target_audience_gender = st.radio("Target gender: \n\n",["male","female","trans","non-binary","others"],key="target_audience_gender",horizontal=True)
-#     target_audience_location = st.radio(
-#         "Target location: \n\n",
-#         ["Urban", "Suburban", "Rural"],
-#         key="target_audience_location",
-#         horizontal=True,
-#     )
-#     st.write("Select your marketing campaign goal: ")
-#     campaign_goal = st.multiselect(
-#         "Select your marketing campaign goal: \n\n",
-#         [
-#             "Increase brand awareness",
-#             "Generate leads",
-#             "Drive sales",
-#             "Improve brand sentiment",
-#         ],
-#         key="campaign_goal",
-#         default=["Increase brand awareness", "Generate leads"],
-#     )
-#     if campaign_goal is None:
-#         campaign_goal = ["Increase brand awareness", "Generate leads"]
-#     brand_voice = st.radio(
-#         "Select your brand voice: \n\n",
-#         ["Formal", "Informal", "Serious", "Humorous"],
-#         key="brand_voice",
-#         horizontal=True,
-#     )
-#     estimated_budget = st.radio(
-#         "Select your estimated budget ($): \n\n",
-#         ["1,000-5,000", "5,000-10,000", "10,000-20,000", "20,000+"],
-#         key="estimated_budget",
-#         horizontal=True,
-#     )
-
-#     prompt = f"""Generate a marketing campaign for {product_name}, a {product_category} designed for the age group: {target_audience_age}.
-#     The target location is this: {target_audience_location}.
-#     Aim to primarily achieve {campaign_goal}.
-#     Emphasize the product's unique selling proposition while using a {brand_voice} tone of voice.
-#     Allocate the total budget of {estimated_budget}.
-#     With these inputs, make sure to follow following guidelines and generate the marketing campaign with proper headlines: \n
-#     - Briefly describe company, its values, mission, and target audience.
-#     - Highlight any relevant brand guidelines or messaging frameworks.
-#     - Provide a concise overview of the campaign's objectives and goals.
-#     - Briefly explain the product or service being promoted.
-#     - Define your ideal customer with clear demographics, psychographics, and behavioral insights.
-#     - Understand their needs, wants, motivations, and pain points.
-#     - Clearly articulate the desired outcomes for the campaign.
-#     - Use SMART goals (Specific, Measurable, Achievable, Relevant, and Time-bound) for clarity.
-#     - Define key performance indicators (KPIs) to track progress and success.
-#     - Specify the primary and secondary goals of the campaign.
-#     - Examples include brand awareness, lead generation, sales growth, or website traffic.
-#     - Clearly define what differentiates your product or service from competitors.
-#     - Emphasize the value proposition and unique benefits offered to the target audience.
-#     - Define the desired tone and personality of the campaign messaging.
-#     - Identify the specific channels you will use to reach your target audience.
-#     - Clearly state the desired action you want the audience to take.
-#     - Make it specific, compelling, and easy to understand.
-#     - Identify and analyze your key competitors in the market.
-#     - Understand their strengths and weaknesses, target audience, and marketing strategies.
-#     - Develop a differentiation strategy to stand out from the competition.
-#     - Define how you will track the success of the campaign.
-#    -  Utilize relevant KPIs to measure performance and return on investment (ROI).
-#    Give proper bullet points and headlines for the marketing campaign. Do not produce any empty lines.
-#    Be very succinct and to the point.
-#     """
-#     config = GenerationConfig(temperature=0.8, max_output_tokens=2048)
-
-#     generate_t2t = st.button("Generate my campaign", key="generate_campaign")
-#     if generate_t2t and prompt:
-#         second_tab1, second_tab2 = st.tabs(["Campaign", "Prompt"])
-#         with st.spinner(
-#             f"Generating your marketing campaign using {get_model_name(selected_model)} ..."
-#         ):
-#             with second_tab1:
-#                 response = get_gemini_response(
-#                     selected_model,  # Use the selected model
-#                     prompt,
-#                     generation_config=config,
-#                 )
-#                 if response:
-#                     st.write("Your marketing campaign:")
-#                     st.write(response)
-#             with second_tab2:
-#                 st.text(prompt)
-
-# with tab3:
-#     st.subheader("Image Playground")
-
-#     selected_model = st.radio(
-#         "Select Gemini Model:",
-#         [gemini_15_flash, gemini_15_pro],
-#         format_func=get_model_name,
-#         key="selected_model_image",
-#         horizontal=True,
-#     )
-
-#     image_undst, screens_undst, diagrams_undst, recommendations, sim_diff = st.tabs(
-#         [
-#             "Furniture recommendation",
-#             "Oven instructions",
-#             "ER diagrams",
-#             "Glasses recommendation",
-#             "Math reasoning",
-#         ]
-#     )
-
-#     with image_undst:
-#         st.markdown(
-#             """In this demo, you will be presented with a scene (e.g., a living room) and will use the Gemini 1.5 Pro model to perform visual understanding. You will see how Gemini 1.0 can be used to recommend an item (e.g., a chair) from a list of furniture options as input. You can use Gemini 1.5 Pro to recommend a chair that would complement the given scene and will be provided with its rationale for such selections from the provided list.
-#                     """
-#         )
-
-#         room_image_uri = (
-#             "gs://github-repo/img/gemini/retail-recommendations/rooms/living_room.jpeg"
-#         )
-#         chair_1_image_uri = (
-#             "gs://github-repo/img/gemini/retail-recommendations/furnitures/chair1.jpeg"
-#         )
-#         chair_2_image_uri = (
-#             "gs://github-repo/img/gemini/retail-recommendations/furnitures/chair2.jpeg"
-#         )
-#         chair_3_image_uri = (
-#             "gs://github-repo/img/gemini/retail-recommendations/furnitures/chair3.jpeg"
-#         )
-#         chair_4_image_uri = (
-#             "gs://github-repo/img/gemini/retail-recommendations/furnitures/chair4.jpeg"
-#         )
-
-#         room_image_urls = get_storage_url(room_image_uri)
-#         chair_1_image_urls = get_storage_url(chair_1_image_uri)
-#         chair_2_image_urls = get_storage_url(chair_2_image_uri)
-#         chair_3_image_urls = get_storage_url(chair_3_image_uri)
-#         chair_4_image_urls = get_storage_url(chair_4_image_uri)
-
-#         room_image = Part.from_uri(room_image_uri, mime_type="image/jpeg")
-#         chair_1_image = Part.from_uri(chair_1_image_uri, mime_type="image/jpeg")
-#         chair_2_image = Part.from_uri(chair_2_image_uri, mime_type="image/jpeg")
-#         chair_3_image = Part.from_uri(chair_3_image_uri, mime_type="image/jpeg")
-#         chair_4_image = Part.from_uri(chair_4_image_uri, mime_type="image/jpeg")
-
-#         st.image(room_image_urls, width=350, caption="Image of a living room")
-#         st.image(
-#             [
-#                 chair_1_image_urls,
-#                 chair_2_image_urls,
-#                 chair_3_image_urls,
-#                 chair_4_image_urls,
-#             ],
-#             width=200,
-#             caption=["Chair 1", "Chair 2", "Chair 3", "Chair 4"],
-#         )
-
-#         st.write(
-#             "Our expectation: Recommend a chair that would complement the given image of a living room."
-#         )
-#         content = [
-#             "Consider the following chairs:",
-#             "chair 1:",
-#             chair_1_image,
-#             "chair 2:",
-#             chair_2_image,
-#             "chair 3:",
-#             chair_3_image,
-#             "and",
-#             "chair 4:",
-#             chair_4_image,
-#             "\n"
-#             "For each chair, explain why it would be suitable or not suitable for the following room:",
-#             room_image,
-#             "Only recommend for the room provided and not other rooms. Provide your recommendation in a table format with chair name and reason as columns.",
-#         ]
-
-#         tab1, tab2 = st.tabs(["Response", "Prompt"])
-#         generate_image_description = st.button(
-#             "Generate recommendation....", key="generate_image_description"
-#         )
-#         with tab1:
-#             if generate_image_description and content:
-#                 with st.spinner(
-#                     f"Generating recommendation using {get_model_name(selected_model)} ..."
-#                 ):
-#                     response = get_gemini_response(selected_model, content)
-#                     st.markdown(response)
-#         with tab2:
-#             st.write("Prompt used:")
-#             st.text(content)
-
-#     with screens_undst:
-#         stove_screen_uri = (
-#             "gs://github-repo/img/gemini/multimodality_usecases_overview/stove.jpg"
-#         )
-#         stove_screen_url = get_storage_url(stove_screen_uri)
-
-#         st.write(
-#             "Equipped with the ability to extract information from visual elements on screens, Gemini 1.5 Pro can analyze screenshots, icons, and layouts to provide a holistic understanding of the depicted scene."
-#         )
-#         # cooking_what = st.radio("What are you cooking?",["Turkey","Pizza","Cake","Bread"],key="cooking_what",horizontal=True)
-#         stove_screen_img = Part.from_uri(stove_screen_uri, mime_type="image/jpeg")
-#         st.image(stove_screen_url, width=350, caption="Image of a oven")
-#         st.write(
-#             "Our expectation: Provide instructions for resetting the clock on this appliance in English"
-#         )
-#         prompt = """How can I reset the clock on this appliance? Provide the instructions in English.
-# If instructions include buttons, also explain where those buttons are physically located.
-# """
-#         tab1, tab2 = st.tabs(["Response", "Prompt"])
-#         generate_instructions_description = st.button(
-#             "Generate instructions", key="generate_instructions_description"
-#         )
-#         with tab1:
-#             if generate_instructions_description and prompt:
-#                 with st.spinner(
-#                     f"Generating instructions using {get_model_name(selected_model)}..."
-#                 ):
-#                     response = get_gemini_response(
-#                         selected_model, [stove_screen_img, prompt]
-#                     )
-#                     st.markdown(response)
-#         with tab2:
-#             st.write("Prompt used:")
-#             st.text(prompt + "\n" + "input_image")
-
-#     with diagrams_undst:
-#         er_diag_uri = (
-#             "gs://github-repo/img/gemini/multimodality_usecases_overview/er.png"
-#         )
-#         er_diag_url = get_storage_url(er_diag_uri)
-
-#         st.write(
-#             "Gemini 1.5 Pro multimodal capabilities empower it to comprehend diagrams and take actionable steps, such as optimization or code generation. The following example demonstrates how Gemini 1.0 can decipher an Entity Relationship (ER) diagram."
-#         )
-#         er_diag_img = Part.from_uri(er_diag_uri, mime_type="image/jpeg")
-#         st.image(er_diag_url, width=350, caption="Image of a ER diagram")
-#         st.write(
-#             "Our expectation: Document the entities and relationships in this ER diagram."
-#         )
-#         prompt = """Document the entities and relationships in this ER diagram.
-#                 """
-#         tab1, tab2 = st.tabs(["Response", "Prompt"])
-#         er_diag_img_description = st.button("Generate!", key="er_diag_img_description")
-#         with tab1:
-#             if er_diag_img_description and prompt:
-#                 with st.spinner("Generating..."):
-#                     response = get_gemini_response(
-#                         selected_model, [er_diag_img, prompt]
-#                     )
-#                     st.markdown(response)
-#         with tab2:
-#             st.write("Prompt used:")
-#             st.text(prompt + "\n" + "input_image")
-
-#     with recommendations:
-#         compare_img_1_uri = (
-#             "gs://github-repo/img/gemini/multimodality_usecases_overview/glasses1.jpg"
-#         )
-#         compare_img_2_uri = (
-#             "gs://github-repo/img/gemini/multimodality_usecases_overview/glasses2.jpg"
-#         )
-
-#         compare_img_1_url = get_storage_url(compare_img_1_uri)
-#         compare_img_2_url = get_storage_url(compare_img_2_uri)
-
-#         st.write(
-#             """Gemini 1.5 Pro is capable of image comparison and providing recommendations. This may be useful in industries like e-commerce and retail.
-#                     Below is an example of choosing which pair of glasses would be better suited to various face types:"""
-#         )
-#         compare_img_1_img = Part.from_uri(compare_img_1_uri, mime_type="image/jpeg")
-#         compare_img_2_img = Part.from_uri(compare_img_2_uri, mime_type="image/jpeg")
-#         face_type = st.radio(
-#             "What is your face shape?",
-#             ["Oval", "Round", "Square", "Heart", "Diamond"],
-#             key="face_type",
-#             horizontal=True,
-#         )
-#         output_type = st.radio(
-#             "Select the output type",
-#             ["text", "table", "json"],
-#             key="output_type",
-#             horizontal=True,
-#         )
-#         st.image(
-#             [compare_img_1_url, compare_img_2_url],
-#             width=350,
-#             caption=["Glasses type 1", "Glasses type 2"],
-#         )
-#         st.write(
-#             f"Our expectation: Suggest which glasses type is better for the {face_type} face shape"
-#         )
-#         content = [
-#             f"""Which of these glasses you recommend for me based on the shape of my face:{face_type}?
-#            I have an {face_type} shape face.
-#            Glasses 1: """,
-#             compare_img_1_img,
-#             """
-#            Glasses 2: """,
-#             compare_img_2_img,
-#             f"""
-#            Explain how you reach out to this decision.
-#            Provide your recommendation based on my face shape, and reasoning for each in {output_type} format.
-#            """,
-#         ]
-#         tab1, tab2 = st.tabs(["Response", "Prompt"])
-#         compare_img_description = st.button(
-#             "Generate recommendation!", key="compare_img_description"
-#         )
-#         with tab1:
-#             if compare_img_description and content:
-#                 with st.spinner(
-#                     f"Generating recommendations using {get_model_name(selected_model)}..."
-#                 ):
-#                     response = get_gemini_response(selected_model, content)
-#                     st.markdown(response)
-#         with tab2:
-#             st.write("Prompt used:")
-#             st.text(content)
-
-#     with sim_diff:
-#         math_image_uri = "gs://github-repo/img/gemini/multimodality_usecases_overview/math_beauty.jpg"
-#         math_image_url = get_storage_url(math_image_uri)
-
-#         st.write(
-#             "Gemini 1.5 Pro can also recognize math formulas and equations and extract specific information from them. This capability is particularly useful for generating explanations for math problems, as shown below."
-#         )
-#         math_image_img = Part.from_uri(math_image_uri, mime_type="image/jpeg")
-#         st.image(math_image_url, width=350, caption="Image of a math equation")
-#         st.markdown(
-#             """
-#                 Our expectation: Ask questions about the math equation as follows:
-#                 - Extract the formula.
-#                 - What is the symbol right before Pi? What does it mean?
-#                 - Is this a famous formula? Does it have a name?
-#                     """
-#         )
-#         prompt = """
-# Follow the instructions.
-# Surround math expressions with $.
-# Use a table with a row for each instruction and its result.
-
-# INSTRUCTIONS:
-# - Extract the formula.
-# - What is the symbol right before Pi? What does it mean?
-# - Is this a famous formula? Does it have a name?
-# """
-#         tab1, tab2 = st.tabs(["Response", "Prompt"])
-#         math_image_description = st.button(
-#             "Generate answers!", key="math_image_description"
-#         )
-#         with tab1:
-#             if math_image_description and prompt:
-#                 with st.spinner(
-#                     f"Generating answers for formula using {get_model_name(selected_model)}..."
-#                 ):
-#                     response = get_gemini_response(
-#                         selected_model, [math_image_img, prompt]
-#                     )
-#                     st.markdown(response)
-#                     st.markdown("\n\n\n")
-#         with tab2:
-#             st.write("Prompt used:")
-#             st.text(prompt)
-
-# with tab4:
-#     st.subheader("Video Playground")
-
-#     selected_model = st.radio(
-#         "Select Gemini Model:",
-#         [gemini_15_flash, gemini_15_pro],
-#         format_func=get_model_name,
-#         key="selected_model_video",
-#         horizontal=True,
-#     )
-
-#     vide_desc, video_tags, video_highlights, video_geolocation = st.tabs(
-#         ["Video description", "Video tags", "Video highlights", "Video geolocation"]
-#     )
-
-#     with vide_desc:
-#         st.markdown(
-#             """Gemini 1.5 Pro can also provide the description of what is going on in the video:"""
-#         )
-#         vide_desc_uri = "gs://github-repo/img/gemini/multimodality_usecases_overview/mediterraneansea.mp4"
-#         video_desc_url = get_storage_url(vide_desc_uri)
-
-#         if vide_desc_uri:
-#             vide_desc_img = Part.from_uri(vide_desc_uri, mime_type="video/mp4")
-#             st.video(video_desc_url)
-#             st.write("Our expectation: Generate the description of the video")
-#             prompt = """Describe what is happening in the video and answer the following questions: \n
-#             - What am I looking at? \n
-#             - Where should I go to see it? \n
-#             - What are other top 5 places in the world that look like this?
-#             """
-#             tab1, tab2 = st.tabs(["Response", "Prompt"])
-#             vide_desc_description = st.button(
-#                 "Generate video description", key="vide_desc_description"
-#             )
-#             with tab1:
-#                 if vide_desc_description and prompt:
-#                     with st.spinner(
-#                         f"Generating video description using {get_model_name(selected_model)} ..."
-#                     ):
-#                         response = get_gemini_response(
-#                             selected_model, [prompt, vide_desc_img]
-#                         )
-#                         st.markdown(response)
-#                         st.markdown("\n\n\n")
-#             with tab2:
-#                 st.write("Prompt used:")
-#                 st.write(prompt, "\n", "{video_data}")
-
-#     with video_tags:
-#         st.markdown(
-#             """Gemini 1.5 Pro can also extract tags throughout a video, as shown below:."""
-#         )
-#         video_tags_uri = "gs://github-repo/img/gemini/multimodality_usecases_overview/photography.mp4"
-#         video_tags_url = get_storage_url(video_tags_uri)
-
-#         if video_tags_url:
-#             video_tags_img = Part.from_uri(video_tags_uri, mime_type="video/mp4")
-#             st.video(video_tags_url)
-#             st.write("Our expectation: Generate the tags for the video")
-#             prompt = """Answer the following questions using the video only:
-#                         1. What is in the video?
-#                         2. What objects are in the video?
-#                         3. What is the action in the video?
-#                         4. Provide 5 best tags for this video?
-#                         Give the answer in the table format with question and answer as columns.
-#             """
-#             tab1, tab2 = st.tabs(["Response", "Prompt"])
-#             video_tags_description = st.button(
-#                 "Generate video tags", key="video_tags_description"
-#             )
-#             with tab1:
-#                 if video_tags_description and prompt:
-#                     with st.spinner(
-#                         f"Generating video description using {get_model_name(selected_model)} ..."
-#                     ):
-#                         response = get_gemini_response(
-#                             selected_model, [prompt, video_tags_img]
-#                         )
-#                         st.markdown(response)
-#                         st.markdown("\n\n\n")
-#             with tab2:
-#                 st.write("Prompt used:")
-#                 st.write(prompt, "\n", "{video_data}")
-#     with video_highlights:
-#         st.markdown(
-#             """Below is another example of using Gemini 1.5 Pro to ask questions about objects, people or the context, as shown in the video about Pixel 8 below:"""
-#         )
-#         video_highlights_uri = (
-#             "gs://github-repo/img/gemini/multimodality_usecases_overview/pixel8.mp4"
-#         )
-#         video_highlights_url = get_storage_url(video_highlights_uri)
-
-#         if video_highlights_url:
-#             video_highlights_img = Part.from_uri(
-#                 video_highlights_uri, mime_type="video/mp4"
-#             )
-#             st.video(video_highlights_url)
-#             st.write("Our expectation: Generate the highlights for the video")
-#             prompt = """Answer the following questions using the video only:
-# What is the profession of the girl in this video?
-# Which all features of the phone are highlighted here?
-# Summarize the video in one paragraph.
-# Provide the answer in table format.
-#             """
-#             tab1, tab2 = st.tabs(["Response", "Prompt"])
-#             video_highlights_description = st.button(
-#                 "Generate video highlights", key="video_highlights_description"
-#             )
-#             with tab1:
-#                 if video_highlights_description and prompt:
-#                     with st.spinner(
-#                         f"Generating video highlights using {get_model_name(selected_model)} ..."
-#                     ):
-#                         response = get_gemini_response(
-#                             selected_model, [prompt, video_highlights_img]
-#                         )
-#                         st.markdown(response)
-#                         st.markdown("\n\n\n")
-#             with tab2:
-#                 st.write("Prompt used:")
-#                 st.write(prompt, "\n", "{video_data}")
-
-#     with video_geolocation:
-#         st.markdown(
-#             """Even in short, detail-packed videos, Gemini 1.5 Pro can identify the locations."""
-#         )
-#         video_geolocation_uri = (
-#             "gs://github-repo/img/gemini/multimodality_usecases_overview/bus.mp4"
-#         )
-#         video_geolocation_url = get_storage_url(video_geolocation_uri)
-
-#         if video_geolocation_url:
-#             video_geolocation_img = Part.from_uri(
-#                 video_geolocation_uri, mime_type="video/mp4"
-#             )
-#             st.video(video_geolocation_url)
-#             st.markdown(
-#                 """Our expectation: \n
-#             Answer the following questions from the video:
-#                 - What is this video about?
-#                 - How do you know which city it is?
-#                 - What street is this?
-#                 - What is the nearest intersection?
-#             """
-#             )
-#             prompt = """Answer the following questions using the video only:
-#             What is this video about?
-#             How do you know which city it is?
-#             What street is this?
-#             What is the nearest intersection?
-#             Answer the following questions in a table format with question and answer as columns.
-#             """
-#             tab1, tab2 = st.tabs(["Response", "Prompt"])
-#             video_geolocation_description = st.button(
-#                 "Generate", key="video_geolocation_description"
-#             )
-#             with tab1:
-#                 if video_geolocation_description and prompt:
-#                     with st.spinner(
-#                         f"Generating location tags using {get_model_name(selected_model)} ..."
-#                     ):
-#                         response = get_gemini_response(
-#                             selected_model, [prompt, video_geolocation_img]
-#                         )
-#                         st.markdown(response)
-#                         st.markdown("\n\n\n")
-#             with tab2:
-#                 st.write("Prompt used:")
-#                 st.write(prompt, "\n", "{video_data}")
+if __name__ == "__main__":
+    main()
