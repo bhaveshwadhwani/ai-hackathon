@@ -1,6 +1,6 @@
 # pylint: disable=line-too-long,invalid-name
 """
-This module demonstrates the usage of the Vertex AI Gemini 1.5 API within a Streamlit application.
+This module demonstrates the usage of the Llama models within a Streamlit application.
 """
 
 import os
@@ -15,11 +15,42 @@ from vertexai.generative_models import (
     Part,
 )
 
+
+# Chat completions API
+import openai
+from google.auth import default, transport
+from google.cloud import storage
+from PIL import Image
+
+
+# authentication
+credentials, _ = default()
+auth_request = transport.requests.Request()
+credentials.refresh(auth_request)
+
 PROJECT_ID = os.environ.get("GCP_PROJECT")
 LOCATION = os.environ.get("GCP_REGION")
 
-vertexai.init(project=PROJECT_ID, location=LOCATION)
 
+BUCKET_URI = f"gs://{PROJECT_ID}"
+
+# Only `us-central1` is supported region for Llama 3.2 models using Model-as-a-Service (MaaS).
+LOCATION = "us-central1"
+
+vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=BUCKET_URI)
+
+MODEL_LOCATION = "us-central1"
+MAAS_ENDPOINT = f"{MODEL_LOCATION}-aiplatform.googleapis.com"
+
+client = openai.OpenAI(
+    base_url=f"https://{MAAS_ENDPOINT}/v1beta1/projects/{PROJECT_ID}/locations/{LOCATION}/endpoints/openapi",
+    api_key=credentials.token,
+)
+
+
+MODEL_ID = "meta/llama-3.2-90b-vision-instruct-maas"  # @param {type:"string"} ["meta/llama-3.2-90b-vision-instruct-maas"]
+
+max_tokens = 4096
 
 @st.cache_resource
 def load_models() -> tuple[GenerativeModel, GenerativeModel]:
@@ -36,12 +67,12 @@ def get_gemini_response(
     stream: bool = True,
 ) -> str:
     """Generate a response from the Gemini model."""
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    }
+    # safety_settings = {
+    #     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    #     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    #     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    #     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    # }
 
     responses = model.generate_content(
         contents,
@@ -63,6 +94,42 @@ def get_gemini_response(
     return " ".join(final_response)
 
 
+
+def get_llama_response(
+    # model: GenerativeModel,
+    # contents: str | list,
+    # generation_config: GenerationConfig = GenerationConfig(
+    #     temperature=0.1, max_output_tokens=2048
+    # ),
+    client,
+    stream: bool = True,
+) -> str:
+    """Generate a response from the llama model."""
+
+
+    response = client.chat.completions.create(
+    model=MODEL_ID,
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {
+                    "image_url": {
+                        "url": "gs://github-repo/img/gemini/intro/landmark1.jpg"
+                    },
+                    "type": "image_url",
+                },
+                {"text": "What’s in this image?", "type": "text"},
+            ],
+        },
+        {"role": "assistant", "content": "In this image, you have:"},
+    ],
+    max_tokens=max_tokens,
+)
+
+    return response.choices[0].message.content
+
+
 def get_model_name(model: GenerativeModel) -> str:
     """Get Gemini Model Name"""
     model_name = model._model_name.replace(  # pylint: disable=protected-access
@@ -79,9 +146,19 @@ def get_storage_url(gcs_uri: str) -> str:
 st.header("Vertex AI Gemini 1.5 API", divider="rainbow")
 gemini_15_flash, gemini_15_pro = load_models()
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Generate story", "Marketing campaign", "Image Playground", "Video Playground"]
+tab0, tab1, tab2, tab3, tab4 = st.tabs(
+    ["LLama","Generate story", "Marketing campaign", "Image Playground", "Video Playground"]
 )
+
+
+with tab0:
+    st.subheader("Generate a LLama response")
+
+    response = get_llama_response(client)
+    
+    if response:
+        st.write("Your answer:")
+        st.write(response)
 
 with tab1:
     st.subheader("Generate a story")
