@@ -2,4 +2,10 @@ streamlit
 google-cloud-aiplatform
 google-cloud-logging
 openai
+langchain-community
+requests
 langchain
+langchain-openai
+faiss-cpu
+python-dotenv
+langchain_groq
