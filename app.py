@@ -14,32 +14,64 @@ headers = {
     "Authorization": "sk-tune-V05AcvTVpDt7GrJj4Th23QyBb95alb4XVfT",
     "Content-Type": "application/json",
 }
-primary_color = "#4A90E2"  # A nice shade of blue
-background_color = "#F0F4F8"  # Light grayish blue
-secondary_background_color = "#E1E8ED"  # Slightly darker grayish blue
-text_color = "#333333"  # Dark gray for text
-font = "sans-serif"
+background_color = "#1E1E1E"  # Dark gray, almost black
+text_color = "#E0E0E0"  # Light gray for text
+primary_color = "#4CAF50"  # Chrome green
+secondary_color = "#388E3C"  # Darker green for hover effects
+accent_color = "#8BC34A"  # Lighter green for accents
+input_bg_color = "#2C2C2C"  # Slightly lighter than background for input fields
+info_bg_color = "#2C3E50"  # Dark blue-gray for info box
+info_text_color = "#FFFFFF"  # Very light blue-gray for info text
+font = "Roboto, sans-serif"  # Modern, clean font
 
 # Custom CSS to style the app
-custom_css = f"""
+custom_css="""
 <style>
-    .stApp {{
-        background-color: {background_color};
-        color: {text_color};
-        font-family: {font};
-    }}
-    .stButton>button {{
-        background-color: {primary_color};
-        color: white;
-    }}
-    .stTextInput>div>div>input {{
-        background-color: {secondary_background_color};
-    }}
-    .stMarkdown {{
-        color: {text_color};
-    }}
+    .stApp {
+        background-color: #1E1E1E;
+        color: #E0E0E0;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: #1E1E1E;
+        border: none;
+        border-radius: 5px;
+        padding: 10px 20px;
+        font-size: 16px;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background-color: #45a049;
+        color: #FFFFFF;
+    }
+    .stTextInput>div>div>input {
+        background-color: #2C2C2C;
+        color: #FFFFFF;
+        border: 1px solid #4CAF50;
+    }
+    .stInfo {
+        background-color: #2C2C2C !important;
+        color: #4CAF50 !important;
+        border: 1px solid #4CAF50;
+        padding: 10px;
+        border-radius: 5px;
+    }
+    p {
+        color: #E0E0E0 !important;
+    }
 </style>
 """
+def set_page_config():
+    st.set_page_config(
+        page_title="LLama Concept Explorer",
+        page_icon="🦙",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    # Inject custom CSS
+    st.markdown(custom_css, unsafe_allow_html=True)
 
 def set_page_config():
     st.set_page_config(
@@ -122,9 +154,9 @@ def generate_questions(user_query):
         
         2. [Next Question]...
         
-        Provide only the questions. Don't include answers or any additional text."""}
+        Provide only the questions. Don't include answers or any additional text. Try to complete it in the same line."""}
     ]
-    response = make_api_call(messages)
+    response = make_api_call(messages, max_tokens=200)
     questions = response['choices'][0]['message']['content'].strip().split('\n\n')
     return [q.strip() for q in questions if q.strip() and q[0].isdigit()]
 
@@ -186,23 +218,6 @@ def analyze_understanding(original_prompt, questions, user_answers):
     
     return refined_prompt
 
-def generate_tailored_explanation(refined_prompt):
-    explanation_prompt = f"""Provide a tailored explanation based on the following refined prompt: '{refined_prompt}'.
-    The explanation should:
-    1. Address the specific aspects mentioned in the refined prompt.
-    2. Be clear and concise, suitable for someone learning about the topic.
-    3. Focus on the areas that seem to need more clarification based on the refined prompt.
-    4. Provide relevant examples or analogies if appropriate.
-
-    Keep the explanation comprehensive yet accessible to someone who has shown interest in learning more about the topic. Don't leave the answers incomplete. You must complete it properly."""
-    
-    messages = [
-        {"role": "system", "content": "You are an AI Educator"},
-        {"role": "user", "content": explanation_prompt}
-    ]
-    response = make_api_call(messages)
-    return response['choices'][0]['message']['content']
-
 def create_persona(user_query, questions, user_answers, refined_prompt):
     persona = io.StringIO()
     persona.write(f"Original Query: {user_query}\n\n")
@@ -218,6 +233,7 @@ import requests
 from typing import List,Optional
 from langchain.embeddings.base import Embeddings
 from langchain.llms.base import LLM
+import logging
 TUNE_API_KEY = "sk-tune-V05AcvTVpDt7GrJj4Th23QyBb95alb4XVfT"
 TUNE_API_URL = "https://proxy.tune.app/chat/completions"
 class ProxyEmbeddings(Embeddings):
@@ -284,52 +300,110 @@ class ProxyLLM(LLM):
 # Initialize embeddings
 #embeddings = ProxyEmbeddings(api_key="sk-tune-V05AcvTVpDt7GrJj4Th23QyBb95alb4XVfT")
 
-def setup_rag(persona):
+def setup_rag(persona: str) -> Optional[RetrievalQA]:
     try:
+        # Set up logging
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+
+        # Increase chunk size and overlap
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=100,
-            chunk_overlap=20,
+            chunk_size=500,  # Increased from 100
+            chunk_overlap=50,  # Increased from 20
             length_function=len
         )
         texts = text_splitter.create_documents([persona])
-        
-        embeddings = ProxyEmbeddings(api_key="sk-tune-V05AcvTVpDt7GrJj4Th23QyBb95alb4XVfT")
-        db = FAISS.from_documents(texts, embeddings)
-        retriever = db.as_retriever()
-        
-        llm = ProxyLLM()
+        logger.info(f"Created {len(texts)} text chunks")
+
+        # Set up embeddings
+        try:
+            embeddings = ProxyEmbeddings(api_key="sk-tune-V05AcvTVpDt7GrJj4Th23QyBb95alb4XVfT")
+            logger.info("Embeddings created successfully")
+        except Exception as e:
+            logger.error(f"Error creating embeddings: {str(e)}")
+            raise
+
+        # Create vector store
+        try:
+            db = FAISS.from_documents(texts, embeddings)
+            retriever = db.as_retriever(search_kwargs={"k": 3})  # Retrieve top 3 chunks
+            logger.info("Vector store created successfully")
+        except Exception as e:
+            logger.error(f"Error creating vector store: {str(e)}")
+            raise
+
+        # Set up LLM
+        try:
+            llm = ProxyLLM()
+            logger.info("LLM initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing LLM: {str(e)}")
+            raise
+
+        # Create QA chain
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
             retriever=retriever,
             return_source_documents=True
         )
+        logger.info("QA chain created successfully")
+
         return qa_chain
     except Exception as e:
-        st.error(f"Error setting up RAG system: {str(e)}")
+        logger.error(f"Error setting up RAG system: {str(e)}")
+        st.error(f"An error occurred while setting up the system. Please try again or contact support if the issue persists.")
         return None
+
+def generate_tailored_explanation(qa_chain: RetrievalQA, refined_prompt: str) -> str:
+    try:
+        # Log the refined prompt
+        logging.info(f"Generating explanation for refined prompt: {refined_prompt}")
+
+        # Use the RAG system to generate the explanation
+        rag_response = qa_chain({"query": refined_prompt})
+        explanation = rag_response['result']
+
+        # Log the generated explanation
+        logging.info(f"Generated explanation: {explanation[:100]}...")  # Log first 100 chars
+
+        if not explanation or explanation.lower().startswith("i don't know"):
+            # If the explanation is empty or starts with "I don't know", generate a fallback response
+            fallback_prompt = f"""Based on the refined prompt: '{refined_prompt}', provide a detailed explanation that:
+            1. Addresses the specific aspects mentioned in the prompt.
+            2. Is clear and concise, suitable for someone learning about the topic.
+            3. Focuses on the areas that seem to need more clarification.
+            4. Provides relevant examples or analogies if appropriate.
+            
+            Ensure the explanation is comprehensive yet accessible."""
+
+            fallback_response = qa_chain({"query": fallback_prompt})
+            explanation = fallback_response['result']
+            logging.info("Used fallback method to generate explanation")
+
+        return explanation
+
+    except Exception as e:
+        logging.error(f"Error generating tailored explanation: {str(e)}")
+        return "I apologize, but I'm having trouble generating a detailed explanation right now. Please try rephrasing your query or try again later."
+
 def llama_tab():
     st.subheader("LLama Concept Explorer and Tailored Explanation")
 
     # Initialize session state variables
     if 'knowledge_mapped' not in st.session_state:
         st.session_state.knowledge_mapped = False
+    if 'user_query' not in st.session_state:
+        st.session_state.user_query = ""
     if 'questions' not in st.session_state:
         st.session_state.questions = []
     if 'refined_prompt' not in st.session_state:
         st.session_state.refined_prompt = ""
     if 'explanation' not in st.session_state:
         st.session_state.explanation = ""
-    if 'user_query' not in st.session_state:
-        st.session_state.user_query = ""
     if 'show_refined_prompt' not in st.session_state:
         st.session_state.show_refined_prompt = False
-    if 'persona' not in st.session_state:
-        st.session_state.persona = ""
-    if 'qa_chain' not in st.session_state:
-        st.session_state.qa_chain = None
 
-    # User query
     user_query = st.text_input("Enter a concept or topic you want to explore:",
                                 key="user_query_input",
                                 value=st.session_state.user_query)
@@ -341,28 +415,12 @@ def llama_tab():
         st.session_state.refined_prompt = ""
         st.session_state.explanation = ""
         st.session_state.show_refined_prompt = False
-        st.session_state.persona = ""
-        st.session_state.qa_chain = None
 
     if st.session_state.user_query and not st.session_state.knowledge_mapped:
         if st.button("Map Your Knowledge", key="map_knowledge_button"):
             with st.spinner("Crafting your knowledge map..."):
-                attempts = 0
-                max_attempts = 3
-                while attempts < max_attempts:
-                    try:
-                        st.session_state.questions = generate_questions(st.session_state.user_query)
-                        if len(st.session_state.questions) == 5:
-                            st.session_state.knowledge_mapped = True
-                            break
-                        else:
-                            raise ValueError("Incorrect number of questions generated")
-                    except (IndexError, ValueError) as e:
-                        attempts += 1
-                        if attempts == max_attempts:
-                            st.error(f"Failed to generate a valid knowledge map: {str(e)}. Please try again or rephrase your query.")
-                        else:
-                            st.warning(f"Attempt {attempts} failed. Trying again...")
+                st.session_state.questions = generate_questions(st.session_state.user_query)
+                st.session_state.knowledge_mapped = True
 
     if st.session_state.knowledge_mapped:
         user_answers = create_quiz(st.session_state.questions)
@@ -373,12 +431,9 @@ def llama_tab():
             else:
                 with st.spinner("Analyzing your understanding and generating personalized insights..."):
                     st.session_state.refined_prompt = analyze_understanding(st.session_state.user_query, st.session_state.questions, user_answers)
-                    st.session_state.persona = create_persona(st.session_state.user_query, st.session_state.questions, user_answers, st.session_state.refined_prompt)
-                    st.session_state.qa_chain = setup_rag(st.session_state.persona)
-                    
-                    # Generate explanation using RAG
-                    rag_response = st.session_state.qa_chain({"query": st.session_state.refined_prompt})
-                    st.session_state.explanation = rag_response['result']
+                    st.session_state.user_persona = create_persona(st.session_state.user_query, st.session_state.questions, user_answers, st.session_state.refined_prompt)
+                    qa_chain = setup_rag(st.session_state.user_persona)
+                    st.session_state.explanation = generate_tailored_explanation(qa_chain, st.session_state.refined_prompt)
 
     if st.session_state.explanation:
         col1, col2, col3 = st.columns([1,2,1])
@@ -390,31 +445,16 @@ def llama_tab():
             st.info(st.session_state.refined_prompt)
 
         st.write("Your Personalized Concept Breakdown:")
-        
-        # Split the explanation into paragraphs
-        paragraphs = st.session_state.explanation.split('\n\n')
-        
-        # Display the first paragraph
-        st.write(paragraphs[0])
-        
-        # Create an expander for the rest of the explanation
-        with st.expander("Read more"):
-            for paragraph in paragraphs[1:]:
-                st.write(paragraph)
-                st.write("")  # Add some space between paragraphs
+        st.write(st.session_state.explanation)
 
     if st.button("Reset Knowledge Map", key="reset_map_button"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
-        st.session_state.knowledge_mapped = False
-        st.session_state.explanation = ""
-        st.session_state.user_query = ""
-        st.session_state.show_refined_prompt = False
-        st.session_state.persona = ""
-        st.session_state.qa_chain = None
+        st.experimental_rerun()
+
 def main():
     set_page_config()
-    st.header("Get 10x specific answers with our chatbot", divider="rainbow")
+    st.header("Unlock 10x Faster, Smarter and Personalised Answers with Our Chatbot!", divider="rainbow")
     llama_tab()
 
 if __name__ == "__main__":
