@@ -6,7 +6,6 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
-from langchain_community.llms import HuggingFaceHub
 import os
 # API configuration
 url = "https://proxy.tune.app/chat/completions"
@@ -25,53 +24,88 @@ info_text_color = "#FFFFFF"  # Very light blue-gray for info text
 font = "Roboto, sans-serif"  # Modern, clean font
 
 # Custom CSS to style the app
-custom_css="""
+custom_css = """
 <style>
+    /* Modern font import */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+
+    /* Global styles */
     .stApp {
-        background-color: #1E1E1E;
-        color: #E0E0E0;
+        font-family: 'Inter', sans-serif;
+        background-color: #FFFFFF;
+        color: #333333;
     }
-    .stButton>button {
-        background-color: #4CAF50;
-        color: #1E1E1E;
+
+    /* Header styles */
+    h1, h2, h3 {
+        color: #000000;
+        font-weight: 600;
+    }
+
+    /* Button styles */
+    .stButton > button {
+        background-color: #007AFF;
+        color: #FFFFFF;
         border: none;
-        border-radius: 5px;
+        border-radius: 8px;
         padding: 10px 20px;
         font-size: 16px;
-        font-weight: bold;
+        font-weight: 500;
         transition: all 0.3s ease;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     }
-    .stButton>button:hover {
-        background-color: #45a049;
-        color: #FFFFFF;
+    .stButton > button:hover {
+        background-color: #0056b3;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
     }
-    .stTextInput>div>div>input {
-        background-color: #2C2C2C;
-        color: #FFFFFF;
-        border: 1px solid #4CAF50;
+
+    /* Input field styles */
+    .stTextInput > div > div > input {
+        background-color: #F5F5F7;
+        color: #333333;
+        border: 1px solid #D2D2D7;
+        border-radius: 8px;
+        padding: 10px 15px;
     }
+
+    /* Info box styles */
     .stInfo {
-        background-color: #2C2C2C !important;
-        color: #4CAF50 !important;
-        border: 1px solid #4CAF50;
-        padding: 10px;
-        border-radius: 5px;
+        background-color: #F5F5F7 !important;
+        color: #1D1D1F !important;
+        border: none;
+        border-radius: 8px;
+        padding: 15px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
     }
-    p {
-        color: #E0E0E0 !important;
+
+    /* Text color */
+    p, li {
+        color: #333333 !important;
+    }
+
+    /* Spinner color */
+    .stSpinner > div {
+        border-top-color: #007AFF !important;
+    }
+
+    /* Streamlit native elements */
+    .css-145kmo2 {
+        border-color: #D2D2D7 !important;
+    }
+    .css-1kyxreq {
+        color: #007AFF !important;
+    }
+
+    /* Custom gradient background for header */
+    .header-gradient {
+        background: linear-gradient(90deg, #007AFF, #00C7BE);
+        color: white;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
     }
 </style>
 """
-def set_page_config():
-    st.set_page_config(
-        page_title="LLama Concept Explorer",
-        page_icon="🦙",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Inject custom CSS
-    st.markdown(custom_css, unsafe_allow_html=True)
 
 def set_page_config():
     st.set_page_config(
@@ -369,13 +403,7 @@ def generate_tailored_explanation(qa_chain: RetrievalQA, refined_prompt: str) ->
 
         if not explanation or explanation.lower().startswith("i don't know"):
             # If the explanation is empty or starts with "I don't know", generate a fallback response
-            fallback_prompt = f"""Based on the refined prompt: '{refined_prompt}', provide a detailed explanation that:
-            1. Addresses the specific aspects mentioned in the prompt.
-            2. Is clear and concise, suitable for someone learning about the topic.
-            3. Focuses on the areas that seem to need more clarification.
-            4. Provides relevant examples or analogies if appropriate.
-            
-            Ensure the explanation is comprehensive yet accessible."""
+            fallback_prompt = refined_prompt
 
             fallback_response = qa_chain({"query": fallback_prompt})
             explanation = fallback_response['result']
@@ -436,10 +464,8 @@ def llama_tab():
                     st.session_state.explanation = generate_tailored_explanation(qa_chain, st.session_state.refined_prompt)
 
     if st.session_state.explanation:
-        col1, col2, col3 = st.columns([1,2,1])
-        with col2:
-            if st.button("Reveal Your Knowledge Profile", key="reveal_button"):
-                st.session_state.show_refined_prompt = not st.session_state.show_refined_prompt
+        if st.button("Reveal Your Knowledge Profile", key="reveal_button"):
+            st.session_state.show_refined_prompt = not st.session_state.show_refined_prompt
 
         if st.session_state.show_refined_prompt:
             st.info(st.session_state.refined_prompt)
@@ -452,10 +478,31 @@ def llama_tab():
             del st.session_state[key]
         st.experimental_rerun()
 
+def set_page_config():
+    st.set_page_config(
+        page_title="LLama Concept Explorer",
+        page_icon="🦙",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    # Inject custom CSS
+    st.markdown(custom_css, unsafe_allow_html=True)
+
 def main():
     set_page_config()
-    st.header("Unlock 10x Faster, Smarter and Personalised Answers with Our Chatbot!", divider="rainbow")
+    
+    # Add gradient header
+    st.markdown("""
+        <div class="header-gradient">
+            <h1 style="font-size: 36px; font-weight: 600;">Unlock 10x Faster, Smarter and Personalised Answers</h1>
+            <p style="font-size: 18px;">Explore concepts with our advanced AI-powered chatbot</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
     llama_tab()
+
+# ... (rest of the code remains the same)
 
 if __name__ == "__main__":
     main()
