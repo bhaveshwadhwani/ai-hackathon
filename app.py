@@ -476,7 +476,7 @@ def llama_tab():
     if st.button("Reset Knowledge Map", key="reset_map_button"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
-        st.experimental_rerun()
+        st.rerun()
 
 def set_page_config():
     st.set_page_config(
